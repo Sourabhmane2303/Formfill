@@ -86,6 +86,7 @@ def _build_prompt(reference_text, context):
         for p in points
     )
     prayer_block = "\n".join(f"- {item}" for item in context['prayer_items'])
+    expected_prayer_count = len(context['prayer_items'])
 
     return f"""You are drafting the prose portions of a legal Affidavit in Reply for an \
 Indian court filing, in the exact structure and phrasing register of the reference \
@@ -99,15 +100,17 @@ limine", "hereto annexed and marked as EXHIBIT-'X'").
 === END REFERENCE ===
 
 Now draft the new affidavit's prose using ONLY the facts below. Do not invent any \
-fact, name, date, or relief not given here. Do not add extra reliefs to the prayer \
-beyond what is listed, though standard catch-all closing language (e.g. "and such \
-other reliefs as the Court may deem fit") is acceptable if it fits the style.
+fact, name, date, or relief not given here.
 
 Important constraints:
 - Do not invent any fact, name, date, exhibit number, or relief not explicitly given above.
-- Do not add extra prayer items beyond those listed; you may only add standard catch-all
-  language (e.g. "and such other reliefs as this Hon'ble Court may deem fit and proper")
-  if it matches the reference style.
+- The "prayer_items" array must have EXACTLY {expected_prayer_count} entries — one per
+  prayer item listed below, in the same order. This is a hard requirement, not a
+  suggestion.
+- Standard catch-all closing language (e.g. "and such other reliefs as this Hon'ble Court
+  may deem fit and proper") is optional and, if used, MUST be appended to the text of the
+  LAST prayer item in that same array position — it must never be its own separate array
+  entry. Do not increase the array length to accommodate it.
 - The "paragraphs" array must have exactly {len(points)} entries, one per reply point.
 
 DEPONENT: {json.dumps(deponent, ensure_ascii=False)}
@@ -128,6 +131,7 @@ Respond with ONLY valid JSON (no markdown fences, no commentary), in this exact 
 }}
 
 The "paragraphs" array must have exactly {len(points)} entries, one per reply point, \
+and the "prayer_items" array must have exactly {expected_prayer_count} entries, \
 in the same order."""
 
 
@@ -237,6 +241,23 @@ def _validate_draft(drafted, expected_paragraphs, expected_prayer_items):
 
     if not isinstance(drafted["prayer_items"], list):
         raise ValueError("'prayer_items' must be a list.")
+
+    # The model is instructed to fold any catch-all closing language into
+    # the last prayer item rather than appending it as a new array entry,
+    # but it occasionally ignores that and adds exactly one extra item
+    # anyway. Rather than burn a full retry (and a Groq round-trip) over
+    # that specific, recoverable slip, merge the stray last item into the
+    # previous one before validating.
+    if len(drafted["prayer_items"]) == expected_prayer_items + 1 and expected_prayer_items > 0:
+        merged = drafted["prayer_items"][:expected_prayer_items - 1]
+        second_last = drafted["prayer_items"][expected_prayer_items - 1].rstrip(". ")
+        last = drafted["prayer_items"][expected_prayer_items]
+        merged.append(f"{second_last}; and {last}")
+        drafted["prayer_items"] = merged
+        logger.info(
+            "Merged an extra trailing prayer item into the previous one "
+            "(model appended catch-all language as a separate array entry)."
+        )
 
     if len(drafted["prayer_items"]) != expected_prayer_items:
         raise ValueError(
